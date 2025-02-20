@@ -3,10 +3,12 @@ import { getCredentialData } from './utils'
 import { ChatAnthropic } from '@langchain/anthropic'
 import { ChatGoogleGenerativeAI } from '@langchain/google-genai'
 import { ChatMistralAI } from '@langchain/mistralai'
-import { ChatOpenAI } from '@langchain/openai'
+import { ChatOpenAI, AzureChatOpenAI } from '@langchain/openai'
 import { z } from 'zod'
 import { PromptTemplate } from '@langchain/core/prompts'
 import { StructuredOutputParser } from '@langchain/core/output_parsers'
+import { ChatGroq } from '@langchain/groq'
+import ollama from 'ollama'
 
 const FollowUpPromptType = z
     .object({
@@ -20,7 +22,9 @@ export const generateFollowUpPrompts = async (
     options: ICommonObject
 ) => {
     if (followUpPromptsConfig) {
+        if (!followUpPromptsConfig.status) return undefined
         const providerConfig = followUpPromptsConfig[followUpPromptsConfig.selectedProvider]
+        if (!providerConfig) return undefined
         const credentialId = providerConfig.credentialId as string
         const credentialData = await getCredentialData(credentialId ?? '', options)
         const followUpPromptsPrompt = providerConfig.prompt.replace('{history}', apiMessageContent)
@@ -42,7 +46,7 @@ export const generateFollowUpPrompts = async (
                 const azureOpenAIApiDeploymentName = credentialData['azureOpenAIApiDeploymentName']
                 const azureOpenAIApiVersion = credentialData['azureOpenAIApiVersion']
 
-                const llm = new ChatOpenAI({
+                const llm = new AzureChatOpenAI({
                     azureOpenAIApiKey,
                     azureOpenAIApiInstanceName,
                     azureOpenAIApiDeploymentName,
@@ -92,6 +96,7 @@ export const generateFollowUpPrompts = async (
                     model: providerConfig.modelName,
                     temperature: parseFloat(`${providerConfig.temperature}`)
                 })
+                // @ts-ignore
                 const structuredLLM = model.withStructuredOutput(FollowUpPromptType)
                 const structuredResponse = await structuredLLM.invoke(followUpPromptsPrompt)
                 return structuredResponse
@@ -105,6 +110,48 @@ export const generateFollowUpPrompts = async (
                 const structuredLLM = model.withStructuredOutput(FollowUpPromptType)
                 const structuredResponse = await structuredLLM.invoke(followUpPromptsPrompt)
                 return structuredResponse
+            }
+            case FollowUpPromptProvider.GROQ: {
+                const llm = new ChatGroq({
+                    apiKey: credentialData.groqApiKey,
+                    model: providerConfig.modelName,
+                    temperature: parseFloat(`${providerConfig.temperature}`)
+                })
+                const structuredLLM = llm.withStructuredOutput(FollowUpPromptType)
+                const structuredResponse = await structuredLLM.invoke(followUpPromptsPrompt)
+                return structuredResponse
+            }
+            case FollowUpPromptProvider.OLLAMA: {
+                const response = await ollama.chat({
+                    model: providerConfig.modelName,
+                    messages: [
+                        {
+                            role: 'user',
+                            content: followUpPromptsPrompt
+                        }
+                    ],
+                    format: {
+                        type: 'object',
+                        properties: {
+                            questions: {
+                                type: 'array',
+                                items: {
+                                    type: 'string'
+                                },
+                                minItems: 3,
+                                maxItems: 3,
+                                description: 'Three follow-up questions based on the conversation history'
+                            }
+                        },
+                        required: ['questions'],
+                        additionalProperties: false
+                    },
+                    options: {
+                        temperature: parseFloat(`${providerConfig.temperature}`)
+                    }
+                })
+                const result = FollowUpPromptType.parse(JSON.parse(response.message.content))
+                return result
             }
         }
     } else {
